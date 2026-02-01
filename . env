@@ -1,0 +1,141 @@
+# ============================================================================
+# FEATURE STORE - ENVIRONMENT VARIABLES
+# ============================================================================
+
+# Application
+APP_NAME=feature-store
+ENVIRONMENT=development
+DEBUG=true
+LOG_LEVEL=INFO
+
+# ============================================================================
+# REDIS (Online Feature Store & Cache)
+# ============================================================================
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_DB=0
+REDIS_PASSWORD=
+REDIS_TTL_DEFAULT=300
+
+# ============================================================================
+# POSTGRESQL (Metadata & Registry)
+# ============================================================================
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DB=feature_store
+POSTGRES_USER=featurestore
+POSTGRES_PASSWORD=featurestore123
+
+# ============================================================================
+# KAFKA (Stream Processing)
+# ============================================================================
+KAFKA_BOOTSTRAP_SERVERS=localhost:9092
+KAFKA_CONSUMER_GROUP=feature-store-consumers
+KAFKA_AUTO_OFFSET_RESET=earliest
+KAFKA_ENABLE_AUTO_COMMIT=false
+
+# Kafka Topics
+KAFKA_TOPIC_USER_EVENTS=user-events
+KAFKA_TOPIC_TRANSACTIONS=transactions
+KAFKA_TOPIC_FEATURES_OUTPUT=features-output
+
+# ============================================================================
+# MINIO (S3-compatible Object Storage)
+# ============================================================================
+MINIO_ENDPOINT=localhost:9000
+MINIO_ACCESS_KEY=minioadmin
+MINIO_SECRET_KEY=minioadmin123
+MINIO_BUCKET_OFFLINE=feature-store-offline
+MINIO_BUCKET_MODELS=feature-store-models
+MINIO_SECURE=false
+
+# ============================================================================
+# AWS S3 (Production)
+# ============================================================================
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+AWS_REGION=us-east-1
+AWS_S3_BUCKET=
+
+# ============================================================================
+# SPARK (Batch Processing)
+# ============================================================================
+SPARK_MASTER=local[*]
+SPARK_APP_NAME=feature-store-batch
+SPARK_EXECUTOR_MEMORY=4g
+SPARK_DRIVER_MEMORY=2g
+SPARK_EXECUTOR_CORES=2
+
+# ============================================================================
+# API
+# ============================================================================
+API_HOST=0.0.0.0
+API_PORT=8000
+API_WORKERS=4
+API_RELOAD=true
+
+# ============================================================================
+# MONITORING
+# ============================================================================
+PROMETHEUS_PORT=8001
+GRAFANA_PORT=3000
+GRAFANA_ADMIN_USER=admin
+GRAFANA_ADMIN_PASSWORD=admin
+
+# ============================================================================
+# MLFLOW (Model Registry)
+# ============================================================================
+MLFLOW_TRACKING_URI=http://localhost:5000
+MLFLOW_ARTIFACT_ROOT=s3://mlflow-artifacts
+
+# ============================================================================
+# DVC (Data Version Control)
+# ============================================================================
+DVC_REMOTE_URL=s3://dvc-storage
+
+# ============================================================================
+# SECURITY
+# ============================================================================
+API_KEY_ENABLED=false
+API_KEY=
+JWT_SECRET_KEY=your-secret-key-change-in-production
+JWT_ALGORITHM=HS256
+JWT_EXPIRATION_MINUTES=60
+
+# ============================================================================
+# FEATURE STORE SETTINGS
+# ============================================================================
+FEATURE_TTL_DEFAULT=300
+FEATURE_CACHE_ENABLED=true
+FEATURE_VALIDATION_ENABLED=true
+FEATURE_VERSIONING_ENABLED=true
+
+# Batch Processing
+BATCH_SCHEDULE_ENABLED=true
+BATCH_CHECKPOINT_INTERVAL=60
+
+# Stream Processing
+STREAM_CHECKPOINT_INTERVAL=30
+STREAM_PARALLELISM=4
+
+# ============================================================================
+# DATA QUALITY
+# ============================================================================
+DATA_QUALITY_ENABLED=true
+DATA_QUALITY_NULL_THRESHOLD=0.05
+DATA_QUALITY_OUTLIER_THRESHOLD=0.01
+DATA_QUALITY_SCHEMA_VALIDATION=true
+
+# ============================================================================
+# ALERTING
+# ============================================================================
+ALERT_ENABLED=false
+ALERT_EMAIL_RECIPIENTS=
+ALERT_SLACK_WEBHOOK=
+
+# ============================================================================
+# TESTING
+# ============================================================================
+TEST_DATABASE_URL=postgresql://test:test@localhost:5432/test_feature_store
+TEST_REDIS_HOST=localhost
+TEST_REDIS_PORT=6380
