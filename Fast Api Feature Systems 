@@ -1,0 +1,401 @@
+"""
+Feature Serving API
+
+API de alta performance para servir features em tempo real
+com cache inteligente e suporte a múltiplas versões.
+"""
+
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from typing import List, Dict, Any, Optional
+import redis
+import json
+from datetime import datetime, timedelta
+import asyncio
+from contextlib import asynccontextmanager
+
+
+# ============================================================================
+# MODELS
+# ============================================================================
+
+class FeatureRequest(BaseModel):
+    """Request para buscar features"""
+    entity_id: str
+    feature_names: List[str]
+    version: Optional[str] = None  # None = latest
+
+
+class FeatureResponse(BaseModel):
+    """Response com features"""
+    entity_id: str
+    features: Dict[str, Any]
+    metadata: Dict[str, Any]
+
+
+class BatchFeatureRequest(BaseModel):
+    """Request para buscar features em batch"""
+    entity_ids: List[str]
+    feature_names: List[str]
+    version: Optional[str] = None
+
+
+# ============================================================================
+# CACHE LAYER
+# ============================================================================
+
+class FeatureCache:
+    """
+    Sistema de cache para features com TTL inteligente
+    """
+    
+    def __init__(self, redis_client: redis.Redis):
+        self.redis = redis_client
+        self.default_ttl = 300  # 5 minutos
+    
+    def _build_key(self, entity_id: str, feature_name: str, version: str) -> str:
+        """Constrói chave de cache"""
+        return f"feature:{feature_name}:{version}:{entity_id}"
+    
+    async def get(
+        self,
+        entity_id: str,
+        feature_name: str,
+        version: str
+    ) -> Optional[Any]:
+        """Busca feature do cache"""
+        key = self._build_key(entity_id, feature_name, version)
+        
+        try:
+            value = self.redis.get(key)
+            if value:
+                return json.loads(value)
+        except Exception as e:
+            print(f"Cache get error: {e}")
+        
+        return None
+    
+    async def set(
+        self,
+        entity_id: str,
+        feature_name: str,
+        version: str,
+        value: Any,
+        ttl: Optional[int] = None
+    ):
+        """Armazena feature no cache"""
+        key = self._build_key(entity_id, feature_name, version)
+        ttl = ttl or self.default_ttl
+        
+        try:
+            self.redis.setex(
+                key,
+                ttl,
+                json.dumps(value)
+            )
+        except Exception as e:
+            print(f"Cache set error: {e}")
+    
+    async def get_batch(
+        self,
+        entity_ids: List[str],
+        feature_name: str,
+        version: str
+    ) -> Dict[str, Any]:
+        """Busca múltiplas features do cache"""
+        results = {}
+        
+        # Usa pipeline para batch get
+        pipe = self.redis.pipeline()
+        keys = [self._build_key(eid, feature_name, version) for eid in entity_ids]
+        
+        for key in keys:
+            pipe.get(key)
+        
+        try:
+            values = pipe.execute()
+            for entity_id, value in zip(entity_ids, values):
+                if value:
+                    results[entity_id] = json.loads(value)
+        except Exception as e:
+            print(f"Cache batch get error: {e}")
+        
+        return results
+    
+    async def invalidate(self, entity_id: str, feature_name: str, version: str):
+        """Invalida feature do cache"""
+        key = self._build_key(entity_id, feature_name, version)
+        try:
+            self.redis.delete(key)
+        except Exception as e:
+            print(f"Cache invalidate error: {e}")
+
+
+# ============================================================================
+# FEATURE STORE
+# ============================================================================
+
+class OnlineFeatureStore:
+    """
+    Feature Store online para serving de baixa latência
+    """
+    
+    def __init__(self, cache: FeatureCache):
+        self.cache = cache
+        # Em produção, conectaria com DB real (DynamoDB, Cassandra, etc)
+        self._mock_db = {}
+    
+    async def get_feature(
+        self,
+        entity_id: str,
+        feature_name: str,
+        version: str
+    ) -> Optional[Any]:
+        """
+        Busca uma feature específica
+        Usa cache first, fallback para DB
+        """
+        # 1. Tenta cache
+        cached_value = await self.cache.get(entity_id, feature_name, version)
+        if cached_value is not None:
+            return cached_value
+        
+        # 2. Busca do DB
+        db_key = f"{entity_id}:{feature_name}:{version}"
+        value = self._mock_db.get(db_key)
+        
+        # 3. Popula cache
+        if value is not None:
+            await self.cache.set(entity_id, feature_name, version, value)
+        
+        return value
+    
+    async def get_features(
+        self,
+        entity_id: str,
+        feature_names: List[str],
+        version: str
+    ) -> Dict[str, Any]:
+        """Busca múltiplas features para uma entidade"""
+        features = {}
+        
+        # Busca em paralelo
+        tasks = [
+            self.get_feature(entity_id, fname, version)
+            for fname in feature_names
+        ]
+        
+        results = await asyncio.gather(*tasks)
+        
+        for fname, value in zip(feature_names, results):
+            if value is not None:
+                features[fname] = value
+        
+        return features
+    
+    async def get_batch(
+        self,
+        entity_ids: List[str],
+        feature_names: List[str],
+        version: str
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Busca features para múltiplas entidades
+        Otimizado para batch serving
+        """
+        results = {eid: {} for eid in entity_ids}
+        
+        for feature_name in feature_names:
+            # Busca batch do cache
+            cached = await self.cache.get_batch(entity_ids, feature_name, version)
+            
+            # Identifica misses
+            missing_ids = [eid for eid in entity_ids if eid not in cached]
+            
+            # Busca misses do DB
+            if missing_ids:
+                for eid in missing_ids:
+                    db_key = f"{eid}:{feature_name}:{version}"
+                    value = self._mock_db.get(db_key)
+                    
+                    if value is not None:
+                        cached[eid] = value
+                        # Popula cache de forma assíncrona
+                        await self.cache.set(eid, feature_name, version, value)
+            
+            # Monta resultado
+            for eid, value in cached.items():
+                results[eid][feature_name] = value
+        
+        return results
+    
+    async def write_feature(
+        self,
+        entity_id: str,
+        feature_name: str,
+        version: str,
+        value: Any
+    ):
+        """
+        Escreve feature (usado por stream processing)
+        """
+        db_key = f"{entity_id}:{feature_name}:{version}"
+        self._mock_db[db_key] = value
+        
+        # Atualiza cache
+        await self.cache.set(entity_id, feature_name, version, value)
+
+
+# ============================================================================
+# API
+# ============================================================================
+
+# Inicializa componentes
+redis_client = redis.Redis(host='localhost', port=6379, decode_responses=True)
+cache = FeatureCache(redis_client)
+feature_store = OnlineFeatureStore(cache)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifecycle management"""
+    # Startup
+    print("Starting Feature Serving API...")
+    yield
+    # Shutdown
+    print("Shutting down...")
+
+
+app = FastAPI(
+    title="Feature Serving API",
+    description="High-performance feature serving with caching and versioning",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+
+
+@app.post("/features/get", response_model=FeatureResponse)
+async def get_features(request: FeatureRequest):
+    """
+    Busca features para uma entidade
+    
+    Exemplo:
+    ```
+    POST /features/get
+    {
+        "entity_id": "user_123",
+        "feature_names": ["user_age", "user_total_purchases"],
+        "version": "1.0.0"
+    }
+    ```
+    """
+    version = request.version or "1.0.0"  # Default version
+    
+    try:
+        features = await feature_store.get_features(
+            request.entity_id,
+            request.feature_names,
+            version
+        )
+        
+        return FeatureResponse(
+            entity_id=request.entity_id,
+            features=features,
+            metadata={
+                "version": version,
+                "timestamp": datetime.now().isoformat(),
+                "cache_hit": True  # Simplificado
+            }
+        )
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/features/batch")
+async def get_features_batch(request: BatchFeatureRequest):
+    """
+    Busca features para múltiplas entidades (batch serving)
+    
+    Otimizado para inferência em batch de modelos ML
+    """
+    version = request.version or "1.0.0"
+    
+    try:
+        results = await feature_store.get_batch(
+            request.entity_ids,
+            request.feature_names,
+            version
+        )
+        
+        return {
+            "results": results,
+            "metadata": {
+                "version": version,
+                "entity_count": len(request.entity_ids),
+                "feature_count": len(request.feature_names),
+                "timestamp": datetime.now().isoformat()
+            }
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/features/write")
+async def write_feature(
+    entity_id: str,
+    feature_name: str,
+    value: Any,
+    version: str = "1.0.0"
+):
+    """
+    Escreve feature (usado por stream processing)
+    """
+    try:
+        await feature_store.write_feature(entity_id, feature_name, version, value)
+        
+        return {
+            "status": "success",
+            "entity_id": entity_id,
+            "feature_name": feature_name,
+            "version": version
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/metrics")
+async def get_metrics():
+    """
+    Retorna métricas do sistema
+    """
+    # Em produção, integraria com Prometheus/Grafana
+    return {
+        "cache_size": len(redis_client.keys("feature:*")),
+        "uptime_seconds": 0,  # Placeholder
+        "requests_per_second": 0,  # Placeholder
+        "p99_latency_ms": 0  # Placeholder
+    }
+
+
+if __name__ == "__main__":
+    import uvicorn
+    
+    print("Starting Feature Serving API...")
+    print("Docs available at: http://localhost:8000/docs")
+    
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000,
+        log_level="info"
+    )
