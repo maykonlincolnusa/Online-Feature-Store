@@ -1,0 +1,177 @@
+version: '3.8'
+
+services:
+  # Redis - Online Feature Store & Cache
+  redis:
+    image: redis:7-alpine
+    container_name: feature-store-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # PostgreSQL - Feature Registry & Metadata
+  postgres:
+    image: postgres:15-alpine
+    container_name: feature-store-postgres
+    environment:
+      POSTGRES_DB: feature_store
+      POSTGRES_USER: featurestore
+      POSTGRES_PASSWORD: featurestore123
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infrastructure/sql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U featurestore"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Kafka - Stream Processing
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: feature-store-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: feature-store-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "9093:9093"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,PLAINTEXT_INTERNAL://kafka:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  # MinIO - S3-compatible storage for offline features
+  minio:
+    image: minio/minio:latest
+    container_name: feature-store-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    volumes:
+      - minio-data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # Feature Serving API
+  feature-api:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile
+    container_name: feature-store-api
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: feature_store
+      POSTGRES_USER: featurestore
+      POSTGRES_PASSWORD: featurestore123
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9093
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin123
+    volumes:
+      - ./src:/app/src
+      - ./config:/app/config
+    command: uvicorn src.serving.api:app --host 0.0.0.0 --port 8000 --reload
+
+  # Jupyter Notebook - Para desenvolvimento e análise
+  jupyter:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile
+    container_name: feature-store-jupyter
+    depends_on:
+      - redis
+      - postgres
+    ports:
+      - "8888:8888"
+    environment:
+      JUPYTER_ENABLE_LAB: "yes"
+      REDIS_HOST: redis
+      POSTGRES_HOST: postgres
+    volumes:
+      - ./notebooks:/app/notebooks
+      - ./src:/app/src
+      - ./data:/app/data
+    command: jupyter lab --ip=0.0.0.0 --allow-root --no-browser --NotebookApp.token=''
+
+  # Prometheus - Monitoring
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: feature-store-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infrastructure/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+
+  # Grafana - Visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: feature-store-grafana
+    depends_on:
+      - prometheus
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./infrastructure/monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+
+volumes:
+  redis-data:
+  postgres-data:
+  minio-data:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  default:
+    name: feature-store-network
