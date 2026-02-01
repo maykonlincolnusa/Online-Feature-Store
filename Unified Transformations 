@@ -1,0 +1,362 @@
+"""
+Unified Transformations - Same logic for Batch and Stream processing
+
+Este módulo garante consistência entre processamento batch e stream
+usando a mesma lógica de transformação.
+"""
+
+from typing import Any, Dict, Callable
+from datetime import datetime, timedelta
+from abc import ABC, abstractmethod
+import pandas as pd
+
+
+class BaseTransformation(ABC):
+    """
+    Classe base para transformações que funcionam tanto em batch quanto stream
+    """
+    
+    def __init__(self, name: str):
+        self.name = name
+    
+    @abstractmethod
+    def transform_single(self, record: Dict[str, Any]) -> Any:
+        """
+        Transformação para um único registro (usado em stream)
+        
+        Args:
+            record: Dicionário com os dados do registro
+            
+        Returns:
+            Valor transformado
+        """
+        pass
+    
+    def transform_batch(self, df: pd.DataFrame) -> pd.Series:
+        """
+        Transformação para um lote de dados (usado em batch)
+        Por padrão, aplica transform_single em cada linha
+        
+        Args:
+            df: DataFrame com os dados
+            
+        Returns:
+            Series com valores transformados
+        """
+        return df.apply(lambda row: self.transform_single(row.to_dict()), axis=1)
+
+
+# ============================================================================
+# USER TRANSFORMATIONS
+# ============================================================================
+
+class CalculateAge(BaseTransformation):
+    """Calcula idade a partir da data de nascimento"""
+    
+    def __init__(self):
+        super().__init__("calculate_age")
+    
+    def transform_single(self, record: Dict[str, Any]) -> int:
+        birth_date = record.get("birth_date")
+        if not birth_date:
+            return None
+        
+        if isinstance(birth_date, str):
+            birth_date = datetime.fromisoformat(birth_date)
+        
+        today = datetime.now()
+        age = today.year - birth_date.year
+        
+        # Ajusta se ainda não fez aniversário este ano
+        if (today.month, today.day) < (birth_date.month, birth_date.day):
+            age -= 1
+        
+        return age
+
+
+class CountUserPurchases(BaseTransformation):
+    """Conta total de compras do usuário"""
+    
+    def __init__(self):
+        super().__init__("count_user_purchases")
+    
+    def transform_single(self, record: Dict[str, Any]) -> int:
+        purchases = record.get("purchases", [])
+        return len(purchases) if purchases else 0
+    
+    def transform_batch(self, df: pd.DataFrame) -> pd.Series:
+        """Versão otimizada para batch"""
+        # Assumindo que temos uma tabela de transações
+        return df.groupby("user_id").size()
+
+
+class AvgPurchaseValue(BaseTransformation):
+    """Calcula valor médio de compras"""
+    
+    def __init__(self):
+        super().__init__("avg_purchase_value")
+    
+    def transform_single(self, record: Dict[str, Any]) -> float:
+        purchases = record.get("purchases", [])
+        if not purchases:
+            return 0.0
+        
+        amounts = [p.get("purchase_amount", 0) for p in purchases]
+        return sum(amounts) / len(amounts) if amounts else 0.0
+    
+    def transform_batch(self, df: pd.DataFrame) -> pd.Series:
+        """Versão otimizada para batch"""
+        return df.groupby("user_id")["purchase_amount"].mean()
+
+
+class CheckPremiumStatus(BaseTransformation):
+    """Verifica se usuário é premium"""
+    
+    def __init__(self):
+        super().__init__("check_premium_status")
+    
+    def transform_single(self, record: Dict[str, Any]) -> bool:
+        subscription_type = record.get("subscription_type", "").lower()
+        return subscription_type in ["premium", "pro", "enterprise"]
+
+
+# ============================================================================
+# TRANSACTION TRANSFORMATIONS
+# ============================================================================
+
+class ExtractHour(BaseTransformation):
+    """Extrai hora do timestamp"""
+    
+    def __init__(self):
+        super().__init__("extract_hour")
+    
+    def transform_single(self, record: Dict[str, Any]) -> int:
+        timestamp = record.get("transaction_timestamp")
+        if not timestamp:
+            return None
+        
+        if isinstance(timestamp, str):
+            timestamp = datetime.fromisoformat(timestamp)
+        
+        return timestamp.hour
+    
+    def transform_batch(self, df: pd.DataFrame) -> pd.Series:
+        """Versão otimizada para batch usando operações vetorizadas"""
+        return pd.to_datetime(df["transaction_timestamp"]).dt.hour
+
+
+class IsWeekend(BaseTransformation):
+    """Verifica se é fim de semana"""
+    
+    def __init__(self):
+        super().__init__("is_weekend")
+    
+    def transform_single(self, record: Dict[str, Any]) -> bool:
+        timestamp = record.get("transaction_timestamp")
+        if not timestamp:
+            return None
+        
+        if isinstance(timestamp, str):
+            timestamp = datetime.fromisoformat(timestamp)
+        
+        return timestamp.weekday() >= 5  # 5=Sábado, 6=Domingo
+    
+    def transform_batch(self, df: pd.DataFrame) -> pd.Series:
+        """Versão otimizada para batch"""
+        return pd.to_datetime(df["transaction_timestamp"]).dt.weekday >= 5
+
+
+class NormalizeAmount(BaseTransformation):
+    """Normaliza valor da transação pelo histórico do usuário"""
+    
+    def __init__(self):
+        super().__init__("normalize_amount")
+    
+    def transform_single(self, record: Dict[str, Any]) -> float:
+        amount = record.get("transaction_amount", 0)
+        avg_amount = record.get("user_avg_purchase_value", 1)
+        
+        if avg_amount == 0:
+            return 0.0
+        
+        return amount / avg_amount
+    
+    def transform_batch(self, df: pd.DataFrame) -> pd.Series:
+        """Versão otimizada para batch"""
+        return df["transaction_amount"] / df["user_avg_purchase_value"].replace(0, 1)
+
+
+# ============================================================================
+# WINDOW AGGREGATIONS
+# ============================================================================
+
+class CountPurchasesWindow(BaseTransformation):
+    """Conta compras em uma janela de tempo"""
+    
+    def __init__(self, window_days: int = 7):
+        super().__init__(f"count_purchases_window_{window_days}d")
+        self.window_days = window_days
+    
+    def transform_single(self, record: Dict[str, Any]) -> int:
+        """Para stream, assume que record já tem o histórico recente"""
+        purchases = record.get("recent_purchases", [])
+        cutoff_date = datetime.now() - timedelta(days=self.window_days)
+        
+        count = 0
+        for purchase in purchases:
+            purchase_date = purchase.get("timestamp")
+            if isinstance(purchase_date, str):
+                purchase_date = datetime.fromisoformat(purchase_date)
+            
+            if purchase_date >= cutoff_date:
+                count += 1
+        
+        return count
+    
+    def transform_batch(self, df: pd.DataFrame) -> pd.Series:
+        """Versão otimizada para batch usando window functions"""
+        df = df.copy()
+        df["transaction_timestamp"] = pd.to_datetime(df["transaction_timestamp"])
+        
+        cutoff_date = datetime.now() - timedelta(days=self.window_days)
+        
+        # Filtra transações na janela de tempo
+        recent = df[df["transaction_timestamp"] >= cutoff_date]
+        
+        # Conta por usuário
+        return recent.groupby("user_id").size()
+
+
+class AvgAmountWindow(BaseTransformation):
+    """Calcula valor médio em uma janela de tempo"""
+    
+    def __init__(self, window_days: int = 30):
+        super().__init__(f"avg_amount_window_{window_days}d")
+        self.window_days = window_days
+    
+    def transform_single(self, record: Dict[str, Any]) -> float:
+        purchases = record.get("recent_purchases", [])
+        cutoff_date = datetime.now() - timedelta(days=self.window_days)
+        
+        amounts = []
+        for purchase in purchases:
+            purchase_date = purchase.get("timestamp")
+            if isinstance(purchase_date, str):
+                purchase_date = datetime.fromisoformat(purchase_date)
+            
+            if purchase_date >= cutoff_date:
+                amounts.append(purchase.get("amount", 0))
+        
+        return sum(amounts) / len(amounts) if amounts else 0.0
+    
+    def transform_batch(self, df: pd.DataFrame) -> pd.Series:
+        """Versão otimizada para batch"""
+        df = df.copy()
+        df["transaction_timestamp"] = pd.to_datetime(df["transaction_timestamp"])
+        
+        cutoff_date = datetime.now() - timedelta(days=self.window_days)
+        recent = df[df["transaction_timestamp"] >= cutoff_date]
+        
+        return recent.groupby("user_id")["transaction_amount"].mean()
+
+
+# ============================================================================
+# TRANSFORMATION REGISTRY
+# ============================================================================
+
+class TransformationRegistry:
+    """
+    Registro central de todas as transformações
+    Garante que a mesma lógica seja usada em batch e stream
+    """
+    
+    def __init__(self):
+        self.transformations: Dict[str, BaseTransformation] = {}
+        self._register_all()
+    
+    def _register_all(self):
+        """Registra todas as transformações disponíveis"""
+        transformations = [
+            CalculateAge(),
+            CountUserPurchases(),
+            AvgPurchaseValue(),
+            CheckPremiumStatus(),
+            ExtractHour(),
+            IsWeekend(),
+            NormalizeAmount(),
+            CountPurchasesWindow(7),
+            AvgAmountWindow(30),
+        ]
+        
+        for transformation in transformations:
+            self.register(transformation)
+    
+    def register(self, transformation: BaseTransformation):
+        """Registra uma transformação"""
+        self.transformations[transformation.name] = transformation
+    
+    def get(self, name: str) -> BaseTransformation:
+        """Recupera uma transformação pelo nome"""
+        return self.transformations.get(name)
+    
+    def apply_single(self, name: str, record: Dict[str, Any]) -> Any:
+        """Aplica transformação em um único registro (stream)"""
+        transformation = self.get(name)
+        if not transformation:
+            raise ValueError(f"Transformation '{name}' not found")
+        
+        return transformation.transform_single(record)
+    
+    def apply_batch(self, name: str, df: pd.DataFrame) -> pd.Series:
+        """Aplica transformação em batch"""
+        transformation = self.get(name)
+        if not transformation:
+            raise ValueError(f"Transformation '{name}' not found")
+        
+        return transformation.transform_batch(df)
+
+
+# Instância global do registry
+transformation_registry = TransformationRegistry()
+
+
+if __name__ == "__main__":
+    # Exemplo de uso
+    
+    # Stream processing (single record)
+    record = {
+        "birth_date": datetime(1990, 5, 15),
+        "transaction_timestamp": datetime.now(),
+        "transaction_amount": 150.0,
+        "user_avg_purchase_value": 100.0
+    }
+    
+    age = transformation_registry.apply_single("calculate_age", record)
+    print(f"Age (stream): {age}")
+    
+    hour = transformation_registry.apply_single("extract_hour", record)
+    print(f"Hour (stream): {hour}")
+    
+    # Batch processing
+    df = pd.DataFrame([
+        {
+            "user_id": 1,
+            "birth_date": datetime(1990, 5, 15),
+            "transaction_timestamp": datetime.now(),
+            "transaction_amount": 150.0,
+            "user_avg_purchase_value": 100.0
+        },
+        {
+            "user_id": 2,
+            "birth_date": datetime(1985, 3, 20),
+            "transaction_timestamp": datetime.now(),
+            "transaction_amount": 200.0,
+            "user_avg_purchase_value": 150.0
+        }
+    ])
+    
+    ages_batch = transformation_registry.apply_batch("calculate_age", df)
+    print(f"\nAges (batch):\n{ages_batch}")
+    
+    hours_batch = transformation_registry.apply_batch("extract_hour", df)
+    print(f"\nHours (batch):\n{hours_batch}")
