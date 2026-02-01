@@ -1,0 +1,269 @@
+"""
+Feature Definitions - Centralized feature catalog with versioning
+"""
+
+from dataclasses import dataclass
+from typing import List, Dict, Any, Optional
+from datetime import datetime
+from enum import Enum
+
+
+class FeatureType(Enum):
+    """Tipos de features suportados"""
+    NUMERICAL = "numerical"
+    CATEGORICAL = "categorical"
+    EMBEDDING = "embedding"
+    BOOLEAN = "boolean"
+    TIMESTAMP = "timestamp"
+
+
+class ComputeMode(Enum):
+    """Modos de computação"""
+    BATCH = "batch"
+    STREAM = "stream"
+    BOTH = "both"
+
+
+@dataclass
+class FeatureDefinition:
+    """
+    Definição de uma feature com metadados completos
+    """
+    name: str
+    version: str
+    feature_type: FeatureType
+    description: str
+    
+    # Transformação
+    transformation_fn: str  # Nome da função de transformação
+    dependencies: List[str]  # Features ou campos necessários
+    
+    # Computação
+    compute_mode: ComputeMode
+    batch_schedule: Optional[str] = None  # Cron expression
+    
+    # Versionamento
+    created_at: datetime = datetime.now()
+    deprecated: bool = False
+    
+    # Validação
+    nullable: bool = False
+    default_value: Any = None
+    
+    # Metadata
+    owner: str = "data-team"
+    tags: List[str] = None
+    
+    def __post_init__(self):
+        if self.tags is None:
+            self.tags = []
+
+
+# ============================================================================
+# USER FEATURES - Versão 1.0
+# ============================================================================
+
+USER_FEATURES_V1 = [
+    FeatureDefinition(
+        name="user_age",
+        version="1.0.0",
+        feature_type=FeatureType.NUMERICAL,
+        description="Idade do usuário calculada a partir da data de nascimento",
+        transformation_fn="calculate_age",
+        dependencies=["birth_date"],
+        compute_mode=ComputeMode.BOTH,
+        tags=["user", "demographic"]
+    ),
+    
+    FeatureDefinition(
+        name="user_total_purchases",
+        version="1.0.0",
+        feature_type=FeatureType.NUMERICAL,
+        description="Total de compras realizadas pelo usuário",
+        transformation_fn="count_user_purchases",
+        dependencies=["user_id", "purchases"],
+        compute_mode=ComputeMode.BOTH,
+        batch_schedule="0 2 * * *",  # Diariamente às 2h
+        tags=["user", "transaction"]
+    ),
+    
+    FeatureDefinition(
+        name="user_avg_purchase_value",
+        version="1.0.0",
+        feature_type=FeatureType.NUMERICAL,
+        description="Valor médio de compras do usuário",
+        transformation_fn="avg_purchase_value",
+        dependencies=["user_id", "purchases", "purchase_amount"],
+        compute_mode=ComputeMode.BOTH,
+        batch_schedule="0 2 * * *",
+        tags=["user", "transaction", "monetary"]
+    ),
+    
+    FeatureDefinition(
+        name="user_is_premium",
+        version="1.0.0",
+        feature_type=FeatureType.BOOLEAN,
+        description="Indica se o usuário possui plano premium",
+        transformation_fn="check_premium_status",
+        dependencies=["subscription_type"],
+        compute_mode=ComputeMode.STREAM,  # Real-time
+        tags=["user", "subscription"]
+    ),
+]
+
+
+# ============================================================================
+# TRANSACTION FEATURES - Versão 1.0
+# ============================================================================
+
+TRANSACTION_FEATURES_V1 = [
+    FeatureDefinition(
+        name="transaction_hour",
+        version="1.0.0",
+        feature_type=FeatureType.NUMERICAL,
+        description="Hora do dia em que a transação ocorreu (0-23)",
+        transformation_fn="extract_hour",
+        dependencies=["transaction_timestamp"],
+        compute_mode=ComputeMode.BOTH,
+        tags=["transaction", "temporal"]
+    ),
+    
+    FeatureDefinition(
+        name="transaction_is_weekend",
+        version="1.0.0",
+        feature_type=FeatureType.BOOLEAN,
+        description="Indica se a transação ocorreu no fim de semana",
+        transformation_fn="is_weekend",
+        dependencies=["transaction_timestamp"],
+        compute_mode=ComputeMode.BOTH,
+        tags=["transaction", "temporal"]
+    ),
+    
+    FeatureDefinition(
+        name="transaction_amount_normalized",
+        version="1.0.0",
+        feature_type=FeatureType.NUMERICAL,
+        description="Valor da transação normalizado por usuário",
+        transformation_fn="normalize_amount",
+        dependencies=["transaction_amount", "user_avg_purchase_value"],
+        compute_mode=ComputeMode.BOTH,
+        tags=["transaction", "normalized"]
+    ),
+]
+
+
+# ============================================================================
+# AGGREGATE FEATURES - Versão 1.0
+# ============================================================================
+
+AGGREGATE_FEATURES_V1 = [
+    FeatureDefinition(
+        name="user_purchases_last_7d",
+        version="1.0.0",
+        feature_type=FeatureType.NUMERICAL,
+        description="Número de compras nos últimos 7 dias",
+        transformation_fn="count_purchases_window",
+        dependencies=["user_id", "transaction_timestamp"],
+        compute_mode=ComputeMode.BOTH,
+        batch_schedule="0 */4 * * *",  # A cada 4 horas
+        tags=["user", "aggregate", "window"]
+    ),
+    
+    FeatureDefinition(
+        name="user_avg_amount_last_30d",
+        version="1.0.0",
+        feature_type=FeatureType.NUMERICAL,
+        description="Valor médio de compras nos últimos 30 dias",
+        transformation_fn="avg_amount_window",
+        dependencies=["user_id", "transaction_amount", "transaction_timestamp"],
+        compute_mode=ComputeMode.BOTH,
+        batch_schedule="0 */6 * * *",  # A cada 6 horas
+        tags=["user", "aggregate", "window", "monetary"]
+    ),
+]
+
+
+# ============================================================================
+# FEATURE REGISTRY
+# ============================================================================
+
+class FeatureRegistry:
+    """
+    Registro central de todas as features com controle de versões
+    """
+    
+    def __init__(self):
+        self.features: Dict[str, Dict[str, FeatureDefinition]] = {}
+        self._register_all()
+    
+    def _register_all(self):
+        """Registra todas as features definidas"""
+        all_features = (
+            USER_FEATURES_V1 + 
+            TRANSACTION_FEATURES_V1 + 
+            AGGREGATE_FEATURES_V1
+        )
+        
+        for feature in all_features:
+            self.register(feature)
+    
+    def register(self, feature: FeatureDefinition):
+        """Registra uma nova feature ou versão"""
+        if feature.name not in self.features:
+            self.features[feature.name] = {}
+        
+        self.features[feature.name][feature.version] = feature
+    
+    def get(self, name: str, version: str = "latest") -> Optional[FeatureDefinition]:
+        """Recupera uma feature específica"""
+        if name not in self.features:
+            return None
+        
+        if version == "latest":
+            # Retorna a versão mais recente não depreciada
+            versions = [
+                (v, f) for v, f in self.features[name].items() 
+                if not f.deprecated
+            ]
+            if not versions:
+                return None
+            versions.sort(key=lambda x: x[0], reverse=True)
+            return versions[0][1]
+        
+        return self.features[name].get(version)
+    
+    def list_features(self, tags: List[str] = None) -> List[FeatureDefinition]:
+        """Lista features, opcionalmente filtradas por tags"""
+        features = []
+        
+        for name, versions in self.features.items():
+            for version, feature in versions.items():
+                if not feature.deprecated:
+                    if tags is None or any(tag in feature.tags for tag in tags):
+                        features.append(feature)
+        
+        return features
+    
+    def deprecate(self, name: str, version: str):
+        """Marca uma feature como depreciada"""
+        if name in self.features and version in self.features[name]:
+            self.features[name][version].deprecated = True
+
+
+# Instância global do registry
+feature_registry = FeatureRegistry()
+
+
+if __name__ == "__main__":
+    # Exemplo de uso
+    registry = FeatureRegistry()
+    
+    # Listar todas features de usuário
+    user_features = registry.list_features(tags=["user"])
+    print(f"Found {len(user_features)} user features")
+    
+    # Pegar feature específica
+    age_feature = registry.get("user_age", "1.0.0")
+    print(f"\nFeature: {age_feature.name}")
+    print(f"Type: {age_feature.feature_type.value}")
+    print(f"Description: {age_feature.description}")
