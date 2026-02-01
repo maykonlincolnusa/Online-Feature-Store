@@ -1,0 +1,201 @@
+# Feature Store Configuration
+
+# ============================================================================
+# FEATURE GROUPS
+# ============================================================================
+
+feature_groups:
+  user_features:
+    description: "User demographic and behavioral features"
+    entity: user_id
+    features:
+      - name: user_age
+        type: numerical
+        version: "1.0.0"
+        compute_mode: both
+        
+      - name: user_total_purchases
+        type: numerical
+        version: "1.0.0"
+        compute_mode: both
+        batch_schedule: "0 2 * * *"
+        
+      - name: user_avg_purchase_value
+        type: numerical
+        version: "1.0.0"
+        compute_mode: both
+        batch_schedule: "0 2 * * *"
+        
+      - name: user_is_premium
+        type: boolean
+        version: "1.0.0"
+        compute_mode: stream
+
+  transaction_features:
+    description: "Transaction-level features"
+    entity: transaction_id
+    features:
+      - name: transaction_hour
+        type: numerical
+        version: "1.0.0"
+        compute_mode: both
+        
+      - name: transaction_is_weekend
+        type: boolean
+        version: "1.0.0"
+        compute_mode: both
+        
+      - name: transaction_amount_normalized
+        type: numerical
+        version: "1.0.0"
+        compute_mode: both
+
+  aggregate_features:
+    description: "Aggregated features with time windows"
+    entity: user_id
+    features:
+      - name: user_purchases_last_7d
+        type: numerical
+        version: "1.0.0"
+        compute_mode: both
+        batch_schedule: "0 */4 * * *"
+        ttl_seconds: 14400  # 4 hours
+        
+      - name: user_avg_amount_last_30d
+        type: numerical
+        version: "1.0.0"
+        compute_mode: both
+        batch_schedule: "0 */6 * * *"
+        ttl_seconds: 21600  # 6 hours
+
+# ============================================================================
+# STORAGE CONFIGURATION
+# ============================================================================
+
+storage:
+  online:
+    type: redis
+    host: ${REDIS_HOST:localhost}
+    port: ${REDIS_PORT:6379}
+    db: 0
+    ttl_default: 300  # 5 minutes
+    
+  offline:
+    type: s3
+    bucket: feature-store-offline
+    endpoint: ${MINIO_ENDPOINT:localhost:9000}
+    access_key: ${MINIO_ACCESS_KEY:minioadmin}
+    secret_key: ${MINIO_SECRET_KEY:minioadmin123}
+    path_prefix: features/
+    
+  metadata:
+    type: postgres
+    host: ${POSTGRES_HOST:localhost}
+    port: ${POSTGRES_PORT:5432}
+    database: ${POSTGRES_DB:feature_store}
+    user: ${POSTGRES_USER:featurestore}
+    password: ${POSTGRES_PASSWORD:featurestore123}
+
+# ============================================================================
+# STREAM PROCESSING
+# ============================================================================
+
+stream:
+  kafka:
+    bootstrap_servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    topics:
+      user_events: user-events
+      transactions: transactions
+      features_output: features-output
+    consumer_group: feature-store-consumers
+    
+  processing:
+    checkpoint_interval: 60  # seconds
+    state_backend: rocksdb
+    parallelism: 4
+
+# ============================================================================
+# BATCH PROCESSING
+# ============================================================================
+
+batch:
+  spark:
+    app_name: feature-store-batch
+    master: local[*]
+    executor_memory: 4g
+    driver_memory: 2g
+    
+  schedules:
+    daily: "0 2 * * *"
+    hourly: "0 * * * *"
+    every_4h: "0 */4 * * *"
+    every_6h: "0 */6 * * *"
+
+# ============================================================================
+# VERSIONING
+# ============================================================================
+
+versioning:
+  enabled: true
+  track_lineage: true
+  track_usage: true
+  auto_deprecate_old_versions: false
+  
+  compatibility_checks:
+    - schema_validation
+    - backward_compatibility
+    - data_quality
+
+# ============================================================================
+# MONITORING
+# ============================================================================
+
+monitoring:
+  prometheus:
+    enabled: true
+    port: 8001
+    
+  metrics:
+    - request_latency
+    - cache_hit_rate
+    - feature_freshness
+    - data_quality_score
+    
+  alerts:
+    - name: high_latency
+      condition: p99_latency > 100ms
+      severity: warning
+      
+    - name: low_cache_hit_rate
+      condition: cache_hit_rate < 0.8
+      severity: warning
+      
+    - name: stale_features
+      condition: feature_age > 24h
+      severity: critical
+
+# ============================================================================
+# QUALITY CHECKS
+# ============================================================================
+
+quality:
+  validation_rules:
+    user_age:
+      - type: range
+        min: 0
+        max: 150
+        
+    transaction_amount:
+      - type: range
+        min: 0
+        max: 1000000
+        
+    user_purchases_last_7d:
+      - type: range
+        min: 0
+        max: 1000
+        
+  data_quality_thresholds:
+    null_rate: 0.05  # Max 5% nulls
+    outlier_rate: 0.01  # Max 1% outliers
+    schema_match_rate: 1.0  # 100% schema compliance
