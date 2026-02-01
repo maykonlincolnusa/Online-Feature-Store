@@ -1,0 +1,90 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints
+*.ipynb
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+*.log.*
+
+# Data
+data/
+*.csv
+*.parquet
+*.pkl
+*.pickle
+
+# ML Models
+models/
+*.h5
+*.pb
+*.onnx
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+
+# DVC
+.dvc/
+
+# Docker
+docker-compose.override.yml
+
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+*.tfvars
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+tmp/
+temp/
+*.tmp
