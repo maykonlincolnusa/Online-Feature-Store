@@ -1,0 +1,357 @@
+"""
+Feature Store - Exemplo Básico de Uso
+
+Este script demonstra como usar o Feature Store para:
+1. Definir features
+2. Processar features em batch e stream
+3. Servir features em tempo real
+4. Versionar features
+"""
+
+import asyncio
+from datetime import datetime
+from typing import List, Dict
+import pandas as pd
+
+# Imports do projeto
+from src.features.definitions import feature_registry, FeatureDefinition
+from src.features.transformations import transformation_registry
+from src.versioning.feature_registry import FeatureVersionRegistry, VersionStatus
+from src.serving.api import OnlineFeatureStore, FeatureCache
+import redis
+
+
+# ============================================================================
+# 1. DEFINIR E REGISTRAR FEATURES
+# ============================================================================
+
+def example_define_features():
+    """Exemplo de como definir e registrar features"""
+    
+    print("=" * 80)
+    print("1. DEFININDO E REGISTRANDO FEATURES")
+    print("=" * 80)
+    
+    # Listar features existentes
+    all_features = feature_registry.list_features()
+    print(f"\nTotal de features registradas: {len(all_features)}")
+    
+    # Filtrar por tag
+    user_features = feature_registry.list_features(tags=["user"])
+    print(f"Features de usuário: {len(user_features)}")
+    
+    for feature in user_features:
+        print(f"  - {feature.name} (v{feature.version}): {feature.description}")
+    
+    # Buscar feature específica
+    age_feature = feature_registry.get("user_age", "1.0.0")
+    print(f"\nFeature 'user_age':")
+    print(f"  Tipo: {age_feature.feature_type.value}")
+    print(f"  Modo: {age_feature.compute_mode.value}")
+    print(f"  Transformação: {age_feature.transformation_fn}")
+
+
+# ============================================================================
+# 2. PROCESSAR FEATURES - STREAM (Single Record)
+# ============================================================================
+
+def example_stream_processing():
+    """Exemplo de processamento stream (registro único)"""
+    
+    print("\n" + "=" * 80)
+    print("2. PROCESSAMENTO STREAM (Tempo Real)")
+    print("=" * 80)
+    
+    # Simula um evento de transação chegando via Kafka
+    transaction_event = {
+        "user_id": "user_123",
+        "transaction_id": "txn_456",
+        "transaction_timestamp": datetime.now(),
+        "transaction_amount": 150.0,
+        "birth_date": datetime(1990, 5, 15),
+        "subscription_type": "premium",
+        "user_avg_purchase_value": 100.0
+    }
+    
+    print("\nEvento recebido:")
+    print(f"  User ID: {transaction_event['user_id']}")
+    print(f"  Amount: ${transaction_event['transaction_amount']}")
+    
+    # Aplica transformações em tempo real
+    print("\nCalculando features em tempo real...")
+    
+    features = {}
+    
+    # User age
+    features['user_age'] = transformation_registry.apply_single(
+        "calculate_age", 
+        transaction_event
+    )
+    
+    # Transaction hour
+    features['transaction_hour'] = transformation_registry.apply_single(
+        "extract_hour",
+        transaction_event
+    )
+    
+    # Is weekend
+    features['transaction_is_weekend'] = transformation_registry.apply_single(
+        "is_weekend",
+        transaction_event
+    )
+    
+    # Premium status
+    features['user_is_premium'] = transformation_registry.apply_single(
+        "check_premium_status",
+        transaction_event
+    )
+    
+    # Normalized amount
+    features['transaction_amount_normalized'] = transformation_registry.apply_single(
+        "normalize_amount",
+        transaction_event
+    )
+    
+    print("\nFeatures calculadas (stream):")
+    for fname, value in features.items():
+        print(f"  {fname}: {value}")
+    
+    return features
+
+
+# ============================================================================
+# 3. PROCESSAR FEATURES - BATCH
+# ============================================================================
+
+def example_batch_processing():
+    """Exemplo de processamento batch"""
+    
+    print("\n" + "=" * 80)
+    print("3. PROCESSAMENTO BATCH")
+    print("=" * 80)
+    
+    # Simula dados de um data warehouse
+    batch_data = pd.DataFrame([
+        {
+            "user_id": "user_123",
+            "birth_date": datetime(1990, 5, 15),
+            "transaction_timestamp": datetime(2024, 2, 1, 14, 30),
+            "transaction_amount": 150.0,
+            "user_avg_purchase_value": 100.0,
+            "subscription_type": "premium"
+        },
+        {
+            "user_id": "user_456",
+            "birth_date": datetime(1985, 3, 20),
+            "transaction_timestamp": datetime(2024, 2, 1, 10, 15),
+            "transaction_amount": 200.0,
+            "user_avg_purchase_value": 150.0,
+            "subscription_type": "basic"
+        },
+        {
+            "user_id": "user_789",
+            "birth_date": datetime(1995, 8, 10),
+            "transaction_timestamp": datetime(2024, 2, 1, 20, 45),
+            "transaction_amount": 75.0,
+            "user_avg_purchase_value": 80.0,
+            "subscription_type": "premium"
+        }
+    ])
+    
+    print(f"\nProcessando {len(batch_data)} registros em batch...")
+    
+    # Aplica transformações em batch (vetorizado, muito mais rápido!)
+    result_df = batch_data.copy()
+    
+    result_df['user_age'] = transformation_registry.apply_batch(
+        "calculate_age",
+        batch_data
+    )
+    
+    result_df['transaction_hour'] = transformation_registry.apply_batch(
+        "extract_hour",
+        batch_data
+    )
+    
+    result_df['transaction_is_weekend'] = transformation_registry.apply_batch(
+        "is_weekend",
+        batch_data
+    )
+    
+    result_df['transaction_amount_normalized'] = transformation_registry.apply_batch(
+        "normalize_amount",
+        batch_data
+    )
+    
+    print("\nResultado do processamento batch:")
+    print(result_df[['user_id', 'user_age', 'transaction_hour', 
+                     'transaction_is_weekend', 'transaction_amount_normalized']])
+    
+    return result_df
+
+
+# ============================================================================
+# 4. VERSIONAMENTO DE FEATURES
+# ============================================================================
+
+def example_versioning():
+    """Exemplo de versionamento de features"""
+    
+    print("\n" + "=" * 80)
+    print("4. VERSIONAMENTO DE FEATURES")
+    print("=" * 80)
+    
+    # Cria registry de versões
+    version_registry = FeatureVersionRegistry()
+    
+    # Registra versão 1.0
+    print("\nRegistrando versão 1.0.0...")
+    v1 = version_registry.register_version(
+        feature_name="user_score",
+        version="1.0.0",
+        feature_type="numerical",
+        schema={"type": "float", "min": 0, "max": 1},
+        transformation_code="def calculate_score(purchases): return min(purchases / 100, 1.0)",
+        transformation_config={"normalization": "min_max"},
+        created_by="data-team",
+        description="User score based on purchase count",
+        source_tables=["users", "transactions"]
+    )
+    
+    print(f"  Feature: {v1.feature_name}")
+    print(f"  Version: {v1.version}")
+    print(f"  Status: {v1.status.value}")
+    
+    # Ativa versão 1.0
+    version_registry.activate_version("user_score", "1.0.0")
+    print(f"  ✓ Versão {v1.version} ativada")
+    
+    # Registra versão 2.0 (com mudança na transformação)
+    print("\nRegistrando versão 2.0.0 (com melhorias)...")
+    v2 = version_registry.register_version(
+        feature_name="user_score",
+        version="2.0.0",
+        feature_type="numerical",
+        schema={"type": "float", "min": 0, "max": 1},
+        transformation_code="def calculate_score(purchases, recency): return min((purchases / 100) * recency_weight, 1.0)",
+        transformation_config={"normalization": "weighted", "recency_weight": 0.7},
+        created_by="data-team",
+        description="User score with recency weighting",
+        parent_version="1.0.0",
+        source_tables=["users", "transactions"]
+    )
+    
+    print(f"  Feature: {v2.feature_name}")
+    print(f"  Version: {v2.version}")
+    print(f"  Compatibilidade: {v2.compatibility_level.value}")
+    
+    # Visualiza histórico de versões
+    print("\nHistórico de versões:")
+    versions = version_registry.list_versions("user_score")
+    for v in versions:
+        status_emoji = "✓" if v.status == VersionStatus.ACTIVE else "○"
+        print(f"  {status_emoji} v{v.version} - {v.status.value} - {v.created_at.strftime('%Y-%m-%d')}")
+    
+    # Lineage
+    print("\nLineage da feature:")
+    lineage = version_registry.get_lineage("user_score", "2.0.0")
+    print(f"  Source tables: {', '.join(lineage['source_tables'])}")
+    print(f"  Parent version: {lineage['parent_version']}")
+
+
+# ============================================================================
+# 5. SERVING DE FEATURES (API)
+# ============================================================================
+
+async def example_feature_serving():
+    """Exemplo de serving de features via API"""
+    
+    print("\n" + "=" * 80)
+    print("5. SERVING DE FEATURES (Tempo Real)")
+    print("=" * 80)
+    
+    # Inicializa componentes
+    redis_client = redis.Redis(host='localhost', port=6379, decode_responses=True)
+    cache = FeatureCache(redis_client)
+    feature_store = OnlineFeatureStore(cache)
+    
+    # Popula algumas features de exemplo
+    print("\nPopulando feature store...")
+    await feature_store.write_feature("user_123", "user_age", "1.0.0", 34)
+    await feature_store.write_feature("user_123", "user_total_purchases", "1.0.0", 45)
+    await feature_store.write_feature("user_123", "user_is_premium", "1.0.0", True)
+    
+    # Busca features para um usuário
+    print("\nBuscando features para user_123...")
+    features = await feature_store.get_features(
+        entity_id="user_123",
+        feature_names=["user_age", "user_total_purchases", "user_is_premium"],
+        version="1.0.0"
+    )
+    
+    print("Features recuperadas:")
+    for fname, value in features.items():
+        print(f"  {fname}: {value}")
+    
+    # Batch serving
+    print("\nBatch serving para múltiplos usuários...")
+    
+    # Popula mais dados
+    await feature_store.write_feature("user_456", "user_age", "1.0.0", 28)
+    await feature_store.write_feature("user_789", "user_age", "1.0.0", 42)
+    
+    batch_results = await feature_store.get_batch(
+        entity_ids=["user_123", "user_456", "user_789"],
+        feature_names=["user_age"],
+        version="1.0.0"
+    )
+    
+    print("Resultados batch:")
+    for user_id, features in batch_results.items():
+        print(f"  {user_id}: age={features.get('user_age', 'N/A')}")
+
+
+# ============================================================================
+# MAIN
+# ============================================================================
+
+def main():
+    """Executa todos os exemplos"""
+    
+    print("\n" + "=" * 80)
+    print("FEATURE STORE - EXEMPLOS DE USO")
+    print("=" * 80)
+    
+    # 1. Definir features
+    example_define_features()
+    
+    # 2. Stream processing
+    example_stream_processing()
+    
+    # 3. Batch processing
+    example_batch_processing()
+    
+    # 4. Versionamento
+    example_versioning()
+    
+    # 5. Feature serving (async)
+    print("\n\nPara testar o serving de features, execute:")
+    print("  python examples/basic_usage.py --serve")
+    print("\nOu inicie a API:")
+    print("  uvicorn src.serving.api:app --reload")
+    print("  Acesse: http://localhost:8000/docs")
+    
+    print("\n" + "=" * 80)
+    print("EXEMPLOS CONCLUÍDOS!")
+    print("=" * 80)
+
+
+if __name__ == "__main__":
+    import sys
+    
+    if "--serve" in sys.argv:
+        # Executa exemplo de serving
+        asyncio.run(example_feature_serving())
+    else:
+        # Executa exemplos básicos
+        main()
