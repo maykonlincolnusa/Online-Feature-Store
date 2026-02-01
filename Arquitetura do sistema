@@ -1,0 +1,376 @@
+# Arquitetura do Feature Store
+
+## Visão Geral
+
+Este documento descreve a arquitetura completa do Feature Store, incluindo componentes, fluxos de dados e decisões de design.
+
+## Componentes Principais
+
+### 1. Feature Pipeline
+
+O pipeline de features é responsável por processar dados brutos e transformá-los em features utilizáveis.
+
+```
+┌─────────────────┐
+│  Data Sources   │
+│  - Kafka        │
+│  - Databases    │
+│  - APIs         │
+└────────┬────────┘
+         │
+    ┌────▼─────┐
+    │ Ingestion│
+    │  Layer   │
+    └────┬─────┘
+         │
+    ┌────▼──────────────┐
+    │  Transformation   │
+    │  - Batch (Spark)  │
+    │  - Stream (Flink) │
+    └────┬──────────────┘
+         │
+    ┌────▼─────────┐
+    │ Validation   │
+    └────┬─────────┘
+         │
+    ┌────▼─────────┐
+    │Feature Store │
+    └──────────────┘
+```
+
+### 2. Storage Layer
+
+#### Online Store (Low Latency)
+- **Tecnologia**: Redis
+- **Uso**: Serving em tempo real (<10ms)
+- **TTL**: Configurável por feature
+- **Sharding**: Por entity_id
+
+#### Offline Store (Historical)
+- **Tecnologia**: S3 + Parquet/Delta Lake
+- **Uso**: Treinamento de modelos, análises
+- **Particionamento**: Por data e feature_group
+- **Compressão**: Snappy
+
+#### Metadata Store
+- **Tecnologia**: PostgreSQL
+- **Uso**: Registry, versionamento, lineage
+- **Schema**:
+  ```sql
+  - features: Definições de features
+  - versions: Histórico de versões
+  - lineage: Dependências entre features
+  - metrics: Estatísticas de uso
+  ```
+
+### 3. Transformation Engine
+
+#### Design Pattern: Unified Transformations
+
+**Problema**: Como garantir que batch e stream produzem os mesmos resultados?
+
+**Solução**: Implementar transformações como classes com dois métodos:
+- `transform_single()`: Para stream processing
+- `transform_batch()`: Para batch processing (vetorizado)
+
+```python
+class BaseTransformation:
+    def transform_single(self, record: Dict) -> Any:
+        # Processa um registro (stream)
+        pass
+    
+    def transform_batch(self, df: DataFrame) -> Series:
+        # Processa DataFrame (batch)
+        # Por padrão, aplica transform_single em cada linha
+        # Pode ser otimizado com operações vetorizadas
+        pass
+```
+
+**Benefícios**:
+- ✅ Mesma lógica garantida
+- ✅ Performance otimizada para batch
+- ✅ Fácil manutenção
+- ✅ Testável
+
+### 4. Versioning System
+
+#### Modelo de Versionamento
+
+**Semantic Versioning** para features:
+- `MAJOR.MINOR.PATCH`
+- **MAJOR**: Mudanças incompatíveis (schema, tipo)
+- **MINOR**: Adições compatíveis
+- **PATCH**: Correções de bugs
+
+#### Compatibilidade
+
+Níveis de compatibilidade entre versões:
+1. **BREAKING**: Requer migração completa
+2. **BACKWARD_COMPATIBLE**: Compatível com versões anteriores
+3. **COMPATIBLE**: Totalmente compatível
+
+#### Migração de Versões
+
+Processo automático de migração:
+
+```
+v1.0.0 → v2.0.0 (BREAKING)
+├── 1. Backfill historical data
+├── 2. Update stream processing
+├── 3. Update model serving
+└── 4. Validate & activate
+```
+
+### 5. Feature Serving
+
+#### API Design
+
+**Endpoints principais**:
+- `POST /features/get`: Single entity
+- `POST /features/batch`: Multiple entities
+- `POST /features/write`: Write feature (from stream)
+
+**Performance Targets**:
+- P50 latency: <5ms
+- P99 latency: <10ms
+- Throughput: >10k RPS
+
+#### Caching Strategy
+
+**Multi-level cache**:
+```
+Request
+  ↓
+L1: In-memory cache (LRU)
+  ↓ miss
+L2: Redis cache (distributed)
+  ↓ miss
+L3: Database (source of truth)
+```
+
+**Cache invalidation**:
+- TTL-based (configurável por feature)
+- Event-driven (quando feature é atualizada)
+
+## Fluxos de Dados
+
+### Stream Processing Flow
+
+```
+Kafka Event
+  ↓
+Consumer → Parse → Transform → Validate
+                      ↓
+                Feature Store (Online)
+                      ↓
+                  Serve via API
+```
+
+**Características**:
+- Latência: ~100ms end-to-end
+- Exactly-once semantics (Kafka transactions)
+- State management: RocksDB
+
+### Batch Processing Flow
+
+```
+Data Warehouse (S3, Redshift)
+  ↓
+Spark Job → Transform → Validate
+              ↓
+        Feature Store (Offline)
+              ↓
+         Model Training
+```
+
+**Características**:
+- Executado via Airflow
+- Particionamento inteligente
+- Incremental processing
+
+### Feature Serving Flow
+
+```
+Model Request
+  ↓
+API → Cache Check → Feature Store
+       ↓               ↓
+     Hit ✓          Miss ✗
+       ↓               ↓
+    Return        Fetch & Cache
+                       ↓
+                    Return
+```
+
+## Garantias de Consistência
+
+### Batch/Stream Consistency
+
+**Problema**: Como garantir que batch e stream produzem os mesmos valores?
+
+**Soluções implementadas**:
+
+1. **Unified Code**: Mesma lógica de transformação
+2. **Validation**: Testes comparando outputs
+3. **Reconciliation**: Job diário que compara resultados
+4. **Monitoring**: Alertas quando divergências são detectadas
+
+### Temporal Consistency
+
+**Watermarks** no stream processing:
+- Event time vs Processing time
+- Late data handling (até 24h de atraso)
+- Reprocessing de dados atrasados
+
+## Monitoramento
+
+### Métricas Principais
+
+**Performance**:
+- Request latency (P50, P95, P99)
+- Cache hit rate
+- Throughput (RPS)
+
+**Data Quality**:
+- Null rate
+- Outlier detection
+- Schema violations
+
+**Freshness**:
+- Feature age
+- Update frequency
+- Staleness alerts
+
+### Dashboards
+
+**Grafana dashboards**:
+1. **System Health**: CPU, Memory, Disk
+2. **API Performance**: Latency, Throughput
+3. **Data Quality**: Validation metrics
+4. **Feature Usage**: Most used features
+
+## Segurança
+
+### Autenticação
+- API Keys para acesso programático
+- OAuth 2.0 para usuários
+
+### Autorização
+- RBAC (Role-Based Access Control)
+- Feature-level permissions
+
+### Auditoria
+- Todos acessos são logados
+- Retention: 90 dias
+
+## Escalabilidade
+
+### Horizontal Scaling
+
+**API Layer**:
+- Stateless design
+- Load balancer (Nginx/ALB)
+- Auto-scaling baseado em CPU/latência
+
+**Stream Processing**:
+- Kafka partitioning
+- Flink parallelism
+- Dynamic resource allocation
+
+**Storage**:
+- Redis cluster (sharding)
+- S3 (ilimitado)
+- PostgreSQL read replicas
+
+### Vertical Scaling
+
+**Limites atuais**:
+- API: 4 vCPU, 8GB RAM por instância
+- Stream: 8 vCPU, 16GB RAM
+- Cache: 16GB Redis
+
+## Disaster Recovery
+
+### Backup Strategy
+
+**Online Store (Redis)**:
+- Snapshots a cada 1h
+- AOF (Append-only file) habilitado
+- Replicação multi-AZ
+
+**Offline Store (S3)**:
+- Versionamento habilitado
+- Cross-region replication
+- Lifecycle policies
+
+**Metadata (PostgreSQL)**:
+- Backups automáticos diários
+- Point-in-time recovery (7 dias)
+- Read replicas para DR
+
+### Recovery Time Objectives
+
+- **RTO** (Recovery Time Objective): 1 hora
+- **RPO** (Recovery Point Objective): 5 minutos
+
+## Trade-offs e Decisões
+
+### Por que Redis para Online Store?
+
+**Prós**:
+- ✅ Latência extremamente baixa (<1ms)
+- ✅ Estruturas de dados ricas
+- ✅ Ampla adoção e suporte
+
+**Contras**:
+- ❌ Custo de memória
+- ❌ Limite de tamanho
+
+**Alternativas consideradas**:
+- DynamoDB: Maior latência (5-10ms)
+- Cassandra: Complexidade operacional
+
+### Por que Spark para Batch?
+
+**Prós**:
+- ✅ Processar grandes volumes
+- ✅ Ecossistema maduro
+- ✅ Integração com Delta Lake
+
+**Contras**:
+- ❌ Overhead de inicialização
+- ❌ Curva de aprendizado
+
+### Por que PostgreSQL para Metadata?
+
+**Prós**:
+- ✅ ACID garantido
+- ✅ Queries complexas
+- ✅ JSON support
+
+**Contras**:
+- ❌ Limite de escala
+
+## Roadmap Futuro
+
+### Curto Prazo (3 meses)
+- [ ] Feature monitoring dashboard
+- [ ] Automated data quality checks
+- [ ] A/B testing framework
+
+### Médio Prazo (6 meses)
+- [ ] Feature discovery UI
+- [ ] Auto-feature engineering
+- [ ] Multi-region deployment
+
+### Longo Prazo (12 meses)
+- [ ] Real-time feature importance
+- [ ] Automatic feature versioning
+- [ ] ML-powered feature recommendations
+
+## Referências
+
+- [Uber's Michelangelo](https://eng.uber.com/michelangelo/)
+- [LinkedIn's Frame](https://engineering.linkedin.com/blog/2016/03/deep-learning-at-linkedin)
+- [Feast Documentation](https://docs.feast.dev/)
+- [Delta Lake](https://delta.io/)
