@@ -1,0 +1,415 @@
+"""
+Feature Versioning System
+
+Sistema completo de versionamento para features, incluindo:
+- Registro de versões
+- Controle de compatibilidade
+- Migração entre versões
+- Auditoria e lineage
+"""
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Dict, List, Optional, Any
+from enum import Enum
+import json
+import hashlib
+
+
+class VersionStatus(Enum):
+    """Status de uma versão de feature"""
+    DRAFT = "draft"
+    ACTIVE = "active"
+    DEPRECATED = "deprecated"
+    ARCHIVED = "archived"
+
+
+class CompatibilityLevel(Enum):
+    """Nível de compatibilidade entre versões"""
+    BREAKING = "breaking"  # Mudança não compatível
+    COMPATIBLE = "compatible"  # Totalmente compatível
+    BACKWARD_COMPATIBLE = "backward_compatible"  # Compatível com versões anteriores
+
+
+@dataclass
+class FeatureVersion:
+    """
+    Representa uma versão específica de uma feature
+    """
+    feature_name: str
+    version: str
+    status: VersionStatus
+    
+    # Schema e tipo
+    feature_type: str
+    schema: Dict[str, Any]
+    
+    # Transformação
+    transformation_code_hash: str  # Hash do código de transformação
+    transformation_config: Dict[str, Any]
+    
+    # Metadata
+    created_at: datetime
+    created_by: str
+    description: str
+    
+    # Compatibilidade
+    parent_version: Optional[str] = None
+    compatibility_level: Optional[CompatibilityLevel] = None
+    
+    # Validação
+    validation_rules: Dict[str, Any] = field(default_factory=dict)
+    
+    # Lineage
+    source_tables: List[str] = field(default_factory=list)
+    dependent_features: List[str] = field(default_factory=list)
+    
+    # Métricas
+    usage_count: int = 0
+    last_used: Optional[datetime] = None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Serializa para dicionário"""
+        return {
+            "feature_name": self.feature_name,
+            "version": self.version,
+            "status": self.status.value,
+            "feature_type": self.feature_type,
+            "schema": self.schema,
+            "transformation_code_hash": self.transformation_code_hash,
+            "transformation_config": self.transformation_config,
+            "created_at": self.created_at.isoformat(),
+            "created_by": self.created_by,
+            "description": self.description,
+            "parent_version": self.parent_version,
+            "compatibility_level": self.compatibility_level.value if self.compatibility_level else None,
+            "validation_rules": self.validation_rules,
+            "source_tables": self.source_tables,
+            "dependent_features": self.dependent_features,
+            "usage_count": self.usage_count,
+            "last_used": self.last_used.isoformat() if self.last_used else None
+        }
+
+
+class FeatureVersionRegistry:
+    """
+    Registro central de versões de features
+    """
+    
+    def __init__(self, storage_backend=None):
+        """
+        Args:
+            storage_backend: Backend de armazenamento (DB, S3, etc)
+        """
+        self.storage_backend = storage_backend
+        self.versions: Dict[str, Dict[str, FeatureVersion]] = {}
+        self.active_versions: Dict[str, str] = {}  # feature_name -> active_version
+    
+    def register_version(
+        self,
+        feature_name: str,
+        version: str,
+        feature_type: str,
+        schema: Dict[str, Any],
+        transformation_code: str,
+        transformation_config: Dict[str, Any],
+        created_by: str,
+        description: str,
+        parent_version: Optional[str] = None,
+        source_tables: List[str] = None,
+        validation_rules: Dict[str, Any] = None
+    ) -> FeatureVersion:
+        """
+        Registra uma nova versão de feature
+        """
+        # Calcula hash do código de transformação
+        code_hash = self._calculate_hash(transformation_code)
+        
+        # Determina nível de compatibilidade
+        compatibility = self._check_compatibility(
+            feature_name, parent_version, schema, code_hash
+        )
+        
+        # Cria versão
+        feature_version = FeatureVersion(
+            feature_name=feature_name,
+            version=version,
+            status=VersionStatus.DRAFT,
+            feature_type=feature_type,
+            schema=schema,
+            transformation_code_hash=code_hash,
+            transformation_config=transformation_config,
+            created_at=datetime.now(),
+            created_by=created_by,
+            description=description,
+            parent_version=parent_version,
+            compatibility_level=compatibility,
+            source_tables=source_tables or [],
+            validation_rules=validation_rules or {}
+        )
+        
+        # Armazena
+        if feature_name not in self.versions:
+            self.versions[feature_name] = {}
+        
+        self.versions[feature_name][version] = feature_version
+        
+        # Persiste se tiver backend
+        if self.storage_backend:
+            self.storage_backend.save(feature_version)
+        
+        return feature_version
+    
+    def activate_version(self, feature_name: str, version: str):
+        """Ativa uma versão específica"""
+        if feature_name not in self.versions:
+            raise ValueError(f"Feature '{feature_name}' not found")
+        
+        if version not in self.versions[feature_name]:
+            raise ValueError(f"Version '{version}' not found for feature '{feature_name}'")
+        
+        # Desativa versão anterior
+        if feature_name in self.active_versions:
+            old_version = self.active_versions[feature_name]
+            if old_version in self.versions[feature_name]:
+                self.versions[feature_name][old_version].status = VersionStatus.DEPRECATED
+        
+        # Ativa nova versão
+        self.versions[feature_name][version].status = VersionStatus.ACTIVE
+        self.active_versions[feature_name] = version
+    
+    def get_version(
+        self, 
+        feature_name: str, 
+        version: Optional[str] = None
+    ) -> Optional[FeatureVersion]:
+        """
+        Recupera uma versão específica
+        Se version=None, retorna a versão ativa
+        """
+        if feature_name not in self.versions:
+            return None
+        
+        if version is None:
+            # Retorna versão ativa
+            active_ver = self.active_versions.get(feature_name)
+            if not active_ver:
+                return None
+            version = active_ver
+        
+        return self.versions[feature_name].get(version)
+    
+    def list_versions(
+        self, 
+        feature_name: str,
+        status: Optional[VersionStatus] = None
+    ) -> List[FeatureVersion]:
+        """Lista todas as versões de uma feature"""
+        if feature_name not in self.versions:
+            return []
+        
+        versions = list(self.versions[feature_name].values())
+        
+        if status:
+            versions = [v for v in versions if v.status == status]
+        
+        return sorted(versions, key=lambda x: x.created_at, reverse=True)
+    
+    def deprecate_version(self, feature_name: str, version: str):
+        """Marca uma versão como depreciada"""
+        if feature_name in self.versions and version in self.versions[feature_name]:
+            self.versions[feature_name][version].status = VersionStatus.DEPRECATED
+    
+    def get_lineage(self, feature_name: str, version: str) -> Dict[str, Any]:
+        """
+        Retorna o lineage completo de uma feature
+        """
+        feature_version = self.get_version(feature_name, version)
+        if not feature_version:
+            return {}
+        
+        lineage = {
+            "feature": feature_name,
+            "version": version,
+            "source_tables": feature_version.source_tables,
+            "dependent_features": feature_version.dependent_features,
+            "parent_version": feature_version.parent_version,
+            "created_at": feature_version.created_at.isoformat(),
+            "created_by": feature_version.created_by
+        }
+        
+        # Adiciona histórico de versões
+        all_versions = self.list_versions(feature_name)
+        lineage["version_history"] = [
+            {
+                "version": v.version,
+                "status": v.status.value,
+                "created_at": v.created_at.isoformat(),
+                "compatibility": v.compatibility_level.value if v.compatibility_level else None
+            }
+            for v in all_versions
+        ]
+        
+        return lineage
+    
+    def track_usage(self, feature_name: str, version: str):
+        """Registra uso de uma feature"""
+        feature_version = self.get_version(feature_name, version)
+        if feature_version:
+            feature_version.usage_count += 1
+            feature_version.last_used = datetime.now()
+    
+    def _calculate_hash(self, code: str) -> str:
+        """Calcula hash MD5 do código"""
+        return hashlib.md5(code.encode()).hexdigest()
+    
+    def _check_compatibility(
+        self,
+        feature_name: str,
+        parent_version: Optional[str],
+        new_schema: Dict[str, Any],
+        new_code_hash: str
+    ) -> Optional[CompatibilityLevel]:
+        """
+        Verifica nível de compatibilidade com versão anterior
+        """
+        if not parent_version:
+            return None
+        
+        parent = self.get_version(feature_name, parent_version)
+        if not parent:
+            return None
+        
+        # Se o código mudou
+        if parent.transformation_code_hash != new_code_hash:
+            # Verifica se schema mudou
+            if parent.schema != new_schema:
+                return CompatibilityLevel.BREAKING
+            else:
+                return CompatibilityLevel.BACKWARD_COMPATIBLE
+        
+        return CompatibilityLevel.COMPATIBLE
+
+
+class FeatureMigration:
+    """
+    Gerencia migração entre versões de features
+    """
+    
+    def __init__(self, registry: FeatureVersionRegistry):
+        self.registry = registry
+    
+    def create_migration_plan(
+        self,
+        feature_name: str,
+        from_version: str,
+        to_version: str
+    ) -> Dict[str, Any]:
+        """
+        Cria um plano de migração entre versões
+        """
+        from_ver = self.registry.get_version(feature_name, from_version)
+        to_ver = self.registry.get_version(feature_name, to_version)
+        
+        if not from_ver or not to_ver:
+            raise ValueError("Version not found")
+        
+        plan = {
+            "feature": feature_name,
+            "from_version": from_version,
+            "to_version": to_version,
+            "compatibility": to_ver.compatibility_level.value if to_ver.compatibility_level else None,
+            "steps": []
+        }
+        
+        # Adiciona passos baseados no nível de compatibilidade
+        if to_ver.compatibility_level == CompatibilityLevel.BREAKING:
+            plan["steps"].extend([
+                "Backfill historical data with new transformation",
+                "Update real-time pipelines",
+                "Update model serving code",
+                "Validate output consistency"
+            ])
+        elif to_ver.compatibility_level == CompatibilityLevel.BACKWARD_COMPATIBLE:
+            plan["steps"].extend([
+                "Deploy new transformation code",
+                "Gradual rollout with monitoring",
+                "Validate output consistency"
+            ])
+        else:
+            plan["steps"].append("Direct switch - no migration needed")
+        
+        return plan
+    
+    def execute_migration(self, plan: Dict[str, Any]) -> bool:
+        """
+        Executa um plano de migração
+        (Implementação simplificada - em produção seria mais complexo)
+        """
+        feature_name = plan["feature"]
+        to_version = plan["to_version"]
+        
+        print(f"Executing migration for {feature_name} to version {to_version}")
+        
+        for i, step in enumerate(plan["steps"], 1):
+            print(f"Step {i}: {step}")
+            # Aqui entraria a lógica real de cada passo
+        
+        # Ativa nova versão
+        self.registry.activate_version(feature_name, to_version)
+        
+        print(f"Migration completed. Version {to_version} is now active.")
+        return True
+
+
+if __name__ == "__main__":
+    # Exemplo de uso
+    
+    registry = FeatureVersionRegistry()
+    
+    # Registra versão 1.0
+    v1 = registry.register_version(
+        feature_name="user_age",
+        version="1.0.0",
+        feature_type="numerical",
+        schema={"type": "integer", "min": 0, "max": 150},
+        transformation_code="def calculate_age(birth_date): return (datetime.now() - birth_date).days // 365",
+        transformation_config={"source_field": "birth_date"},
+        created_by="data-team",
+        description="User age calculated from birth date",
+        source_tables=["users"]
+    )
+    
+    print(f"Registered version: {v1.version}")
+    
+    # Ativa versão 1.0
+    registry.activate_version("user_age", "1.0.0")
+    
+    # Registra versão 2.0 (com mudança no código)
+    v2 = registry.register_version(
+        feature_name="user_age",
+        version="2.0.0",
+        feature_type="numerical",
+        schema={"type": "integer", "min": 0, "max": 150},
+        transformation_code="def calculate_age(birth_date): return relativedelta(datetime.now(), birth_date).years",
+        transformation_config={"source_field": "birth_date"},
+        created_by="data-team",
+        description="User age calculated with more precision",
+        parent_version="1.0.0",
+        source_tables=["users"]
+    )
+    
+    print(f"\nRegistered new version: {v2.version}")
+    print(f"Compatibility: {v2.compatibility_level.value}")
+    
+    # Cria plano de migração
+    migration = FeatureMigration(registry)
+    plan = migration.create_migration_plan("user_age", "1.0.0", "2.0.0")
+    
+    print(f"\nMigration Plan:")
+    print(json.dumps(plan, indent=2))
+    
+    # Lineage
+    lineage = registry.get_lineage("user_age", "2.0.0")
+    print(f"\nFeature Lineage:")
+    print(json.dumps(lineage, indent=2))
