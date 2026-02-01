@@ -1,0 +1,244 @@
+# Guia de Início Rápido
+
+## Instalação
+
+### Pré-requisitos
+
+- Docker & Docker Compose
+- Python 3.11+
+- Git
+
+### Passo 1: Clone o Repositório
+
+```bash
+git clone https://github.com/seu-usuario/feature-store-project.git
+cd feature-store-project
+```
+
+### Passo 2: Configure o Ambiente
+
+```bash
+# Copie o arquivo de exemplo
+cp .env.example .env
+
+# Edite conforme necessário
+vim .env
+```
+
+### Passo 3: Inicie a Infraestrutura
+
+```bash
+cd infrastructure/docker
+docker-compose up -d
+```
+
+Isso iniciará:
+- ✅ Redis (cache)
+- ✅ PostgreSQL (metadata)
+- ✅ Kafka (stream processing)
+- ✅ MinIO (storage)
+- ✅ Feature API
+- ✅ Prometheus & Grafana
+
+### Passo 4: Verifique a Instalação
+
+```bash
+# Verifica se todos os serviços estão rodando
+docker-compose ps
+
+# Testa a API
+curl http://localhost:8000/health
+```
+
+## Uso Básico
+
+### 1. Definir Features
+
+```python
+from src.features.definitions import FeatureDefinition, FeatureType, ComputeMode
+
+# Define uma nova feature
+user_age = FeatureDefinition(
+    name="user_age",
+    version="1.0.0",
+    feature_type=FeatureType.NUMERICAL,
+    description="User age calculated from birth date",
+    transformation_fn="calculate_age",
+    dependencies=["birth_date"],
+    compute_mode=ComputeMode.BOTH,
+    tags=["user", "demographic"]
+)
+```
+
+### 2. Processar Features (Stream)
+
+```python
+from src.features.transformations import transformation_registry
+
+# Evento chegando do Kafka
+event = {
+    "user_id": "user_123",
+    "birth_date": "1990-05-15",
+    "transaction_amount": 150.0
+}
+
+# Aplica transformação
+age = transformation_registry.apply_single("calculate_age", event)
+print(f"User age: {age}")
+```
+
+### 3. Processar Features (Batch)
+
+```python
+import pandas as pd
+
+# Dados do data warehouse
+df = pd.read_parquet("s3://bucket/users.parquet")
+
+# Aplica transformação em batch
+df['user_age'] = transformation_registry.apply_batch("calculate_age", df)
+```
+
+### 4. Servir Features via API
+
+```python
+import httpx
+
+# Buscar features
+response = httpx.post("http://localhost:8000/features/get", json={
+    "entity_id": "user_123",
+    "feature_names": ["user_age", "user_total_purchases"],
+    "version": "1.0.0"
+})
+
+features = response.json()["features"]
+print(features)
+```
+
+### 5. Versionar Features
+
+```python
+from src.versioning.feature_registry import FeatureVersionRegistry
+
+registry = FeatureVersionRegistry()
+
+# Registra nova versão
+v2 = registry.register_version(
+    feature_name="user_age",
+    version="2.0.0",
+    feature_type="numerical",
+    schema={"type": "integer"},
+    transformation_code="...",
+    transformation_config={},
+    created_by="data-team",
+    description="Improved age calculation",
+    parent_version="1.0.0"
+)
+
+# Ativa versão
+registry.activate_version("user_age", "2.0.0")
+```
+
+## Exemplos Práticos
+
+### Executar Exemplos
+
+```bash
+# Exemplo básico
+python examples/basic_usage.py
+
+# Exemplo com serving
+python examples/basic_usage.py --serve
+```
+
+### Acessar Jupyter Lab
+
+```bash
+# Jupyter está disponível em:
+http://localhost:8888
+
+# Notebooks de exemplo estão em /notebooks
+```
+
+### Acessar Documentação da API
+
+```bash
+# Swagger UI
+http://localhost:8000/docs
+
+# ReDoc
+http://localhost:8000/redoc
+```
+
+## Monitoramento
+
+### Prometheus
+
+```bash
+# Métricas disponíveis em:
+http://localhost:9090
+```
+
+### Grafana
+
+```bash
+# Dashboards em:
+http://localhost:3000
+
+# Credenciais padrão:
+# Username: admin
+# Password: admin
+```
+
+## Próximos Passos
+
+1. **Leia a documentação completa**: [docs/](./docs/)
+2. **Explore os exemplos**: [examples/](./examples/)
+3. **Configure suas features**: [config/features.yaml](./config/features.yaml)
+4. **Customize transformações**: [src/features/transformations.py](./src/features/transformations.py)
+
+## Troubleshooting
+
+### Redis não conecta
+
+```bash
+# Verifica se Redis está rodando
+docker-compose ps redis
+
+# Reinicia Redis
+docker-compose restart redis
+```
+
+### Kafka não disponível
+
+```bash
+# Verifica logs
+docker-compose logs kafka
+
+# Recria containers
+docker-compose down
+docker-compose up -d
+```
+
+### API com erro 500
+
+```bash
+# Verifica logs da API
+docker-compose logs feature-api
+
+# Verifica variáveis de ambiente
+docker-compose exec feature-api env
+```
+
+## Recursos Úteis
+
+- **Documentação**: [docs/](./docs/)
+- **Issues**: https://github.com/seu-usuario/feature-store-project/issues
+- **Discussions**: https://github.com/seu-usuario/feature-store-project/discussions
+
+## Suporte
+
+Para obter ajuda:
+1. Verifique a [documentação](./docs/)
+2. Procure em [Issues existentes](https://github.com/seu-usuario/feature-store-project/issues)
+3. Crie uma nova issue com detalhes do problema
