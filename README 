@@ -1,0 +1,44 @@
+# Documentação do Feature Store
+
+Bem-vindo à documentação completa do Feature Store!
+
+## Índice
+
+1. [Início Rápido](QUICKSTART.md)
+2. [Arquitetura](architecture.md)
+3. [Guia de Features](features-guide.md)
+4. [Versionamento](versioning.md)
+5. [Deploy](deployment.md)
+
+## Visão Geral
+
+Este Feature Store fornece uma plataforma completa para:
+
+- **Processamento em tempo real**: Features com latência <10ms
+- **Processamento em batch**: Pipelines Spark para grandes volumes
+- **Consistência**: Mesma lógica em batch e stream
+- **Versionamento**: Controle completo de versões
+- **Monitoramento**: Métricas e alertas em tempo real
+
+## Documentos Principais
+
+### [Início Rápido](QUICKSTART.md)
+Guia rápido para começar a usar o Feature Store em minutos.
+
+### [Arquitetura](architecture.md)
+Visão detalhada da arquitetura do sistema, componentes e fluxos de dados.
+
+### Guia de Features (em desenvolvimento)
+Como definir, processar e servir features.
+
+### Versionamento (em desenvolvimento)
+Sistema de versionamento de features e migração entre versões.
+
+### Deploy (em desenvolvimento)
+Guias de deploy para diferentes ambientes (local, staging, produção).
+
+## Suporte
+
+- **Issues**: https://github.com/seu-usuario/feature-store-project/issues
+- **Discussions**: https://github.com/seu-usuario/feature-store-project/discussions
+- **Email**: team@example.com
